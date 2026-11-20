@@ -6,9 +6,9 @@
 
 铸星制造能源组负责ZX-A01空压站。当前仪表员导出 `ZX-A01_20261101-10_小时计量.xlsx`，工程师在工作簿中试删变量和拟合回归，再用周会文档提出节能动作。三个痛点：随机切分把未来信息带入训练、标准化使用全表、回归系数被误当成可直接兑现的节能收益。
 
-上游是压力/气量/温度/开机台数和电表小时记录；本应用替代时间窗校验、特征配置、模型比选和评议留痕；下游是工艺负责人安排安全可控的试点。
+上游是压力/气量/温度/开机台数和电表小时记录；本应用替代时间窗校验、特征配置、模型比选和评议留痕；下游是工艺负责人安排安全可控的试点。调压试点结束后，在同一本应用登记试点时段，用更早的同班次可比工况估算节电并签核留痕。
 
-四页分别为耗电样本、特征方案、模型比选、节能评议。三类核心实体为Sample（小时计量）、Run（特征/alpha配置与冻结模型结果）、Review（观察、业务动作和签核）；另有User和Audit。
+五页分别为耗电样本、特征方案、模型比选、节能评议、调压试点。核心实体为Sample（小时计量）、Run（特征/alpha配置与冻结模型结果）、Review（观察、业务动作和签核）、Pilot（调压试点时段与评估状态）、Pairing（试点小时与对照小时配对）；另有User和Audit。
 
 |角色|权限|典型动作|
 |---|---|---|
@@ -27,7 +27,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 前端 [localhost:18209](http://localhost:18209)，后端 [localhost:19209/docs](http://localhost:19209/docs)，MySQL映射17709。演示账号 `admin@demo.local`、`analyst@demo.local`、`viewer@demo.local`，密码均 `Demo123!`。演示凭据仅供本地使用，部署时替换DB_PASSWORD/JWT_SECRET。
 
-`SEED_DEMO=true` 启动自动执行一次seed，生成3账号、240小时计量：2026-11-01 00:00至11-10 23:00，固定随机种子3110。按本地小时自然键幂等，重复执行不新增同小时也不覆盖人工修订。
+`SEED_DEMO=true` 启动自动执行一次seed，生成3账号、240小时计量：2026-11-01 00:00至11-10 23:00，固定随机种子3110；末两日（11-09起）为演示调压试点，压力与耗电下调，并生成已评估的“ZX-A01调压试点1109”。按本地小时自然键幂等，重复执行不新增同小时也不覆盖人工修订。
 
 ## 一天的业务剧本
 
@@ -39,6 +39,14 @@ docker compose exec -T backend python -m scripts.seed_demo
 6. 09:40 worker计算完成，模型比选页核对末段RMSE、基线、每折时间和系数单位，导出 `airpower-select-<id>.json`。
 7. 10:00 analyst起草“空载复核”，写明模型观察、安全边界和保持产量一致的试点动作。
 8. 10:10 admin签核后评议冻结；10:20 viewer下载 `airpower-review-<id>.json`。
+9. 11月11日 analyst登记“ZX-A01调压试点”时段并评估配对，核对配对小时、未配原因和节电差额。
+10. admin按当前配对版本签核，配对与原读数锁定；此后样本修订只重算未签核试点。
+
+## 调压试点配对口径
+
+登记试点时段（开始/结束整点小时、目标压力）时校验时段内小时计量齐全；若时段覆盖已签核试点的对照小时，拒绝登记并列出受影响试点。评估时逐个试点小时从试点开始之前的记录里找对照：同一8小时班次、同开机台数、气量差≤0.5m³/min、温度差≤3℃，且候选小时不落在任何试点时段内；满足条件者按气量/温度归一化距离择优。每个对照小时全站只用一次（数据库唯一约束）。负荷段按开机台数划分，每个出现的负荷段至少有一对配对才算有代表性，否则不能签核。节电差额=对照kWh−试点kWh，汇总总节电、平均节电和节电率。
+
+配对评估同步计算：同一事务内先释放本试点旧配对再写入新配对，重试不会重复占用对照小时；并发评估争抢同一对照小时时由唯一约束拒绝并提示重试。每次评估生成递增的配对版本号；签核必须携带所见版本号，计算与签核并发时过时配对被拒绝。签核锁定配对及原读数快照，此后样本修订只触发未签核试点的重算，已签核结果不变。配对评估为同步事务而非worker排队，因为对照小时的全站唯一占用必须在单个数据库事务内成立。
 
 ## 算法与口径
 
@@ -60,7 +68,7 @@ Nginx `/api/`转后端根路由，前端SPA回落。仅前端、后端和数据�
 
 本地开发可先启动db/redis，backend安装requirements并设DATABASE_URL/REDIS_URL/JWT_SECRET后运行 `uvicorn src.main:app --reload`；前端使用Nginx或同源代理。依赖固定在requirements.txt。
 
-变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET。独立子网10.253.110.0/24规避当前机器地址池耗尽，迁移可调整。角色ROLES、任务STATES、特征FEATURES和评议REVIEW_STATES分别定义在后端src/constants/enums.py与前端src/constants/enums.js，schema校验在backend/src/schemas/business.py，持久化列见models/entities.py。
+变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET。独立子网10.253.110.0/24规避当前机器地址池耗尽，迁移可调整。角色ROLES、任务STATES、特征FEATURES、评议REVIEW_STATES和试点PILOT_STATES分别定义在后端src/constants/enums.py与前端src/constants/enums.js，配对容差MATCH_FLOW_TOL/MATCH_TEMP_TOL/SHIFT_HOURS在后端src/constants/enums.py，schema校验在backend/src/schemas/business.py，持久化列见models/entities.py。
 
 ## 范围与交付
 

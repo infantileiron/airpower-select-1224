@@ -1,7 +1,11 @@
 from datetime import datetime
-from pydantic import BaseModel,Field,field_validator
+from pydantic import BaseModel,Field,field_validator,model_validator
 from typing import Literal
 Feature=Literal['pressure','flow','temperature','machines','sensor_noise']
+def whole_hour(v):
+ d=datetime.fromisoformat(v)
+ if d.tzinfo or d.minute or d.second or d.microsecond:raise ValueError('使用工厂本地整点小时，不带时区偏移')
+ return d.strftime('%Y-%m-%dT%H:00')
 class Login(BaseModel):email:str;password:str
 class SampleInput(BaseModel):
  hour:str
@@ -14,10 +18,7 @@ class SampleInput(BaseModel):
  note:str=Field(default='',max_length=1000)
  @field_validator('hour')
  @classmethod
- def hourly(cls,v):
-  d=datetime.fromisoformat(v)
-  if d.tzinfo or d.minute or d.second or d.microsecond:raise ValueError('使用工厂本地整点小时，不带时区偏移')
-  return d.strftime('%Y-%m-%dT%H:00')
+ def hourly(cls,v):return whole_hour(v)
 class RunInput(BaseModel):
  name:str=Field(min_length=2,max_length=100)
  features:list[Feature]=Field(default=['pressure','flow','temperature','machines'],min_length=1,max_length=5)
@@ -38,3 +39,19 @@ class ReviewInput(BaseModel):
  title:str=Field(min_length=2,max_length=100)
  finding:str=Field(min_length=8,max_length=2000)
  action:str=Field(min_length=8,max_length=2000)
+class PilotInput(BaseModel):
+ name:str=Field(min_length=2,max_length=100)
+ start_hour:str
+ end_hour:str
+ target_pressure:float=Field(ge=0,le=20,allow_inf_nan=False)
+ note:str=Field(default='',max_length=1000)
+ @field_validator('start_hour','end_hour')
+ @classmethod
+ def hourly(cls,v):return whole_hour(v)
+ @model_validator(mode='after')
+ def ordered(self):
+  if self.end_hour<self.start_hour:raise ValueError('结束小时不能早于开始小时')
+  span=(datetime.fromisoformat(self.end_hour)-datetime.fromisoformat(self.start_hour)).total_seconds()/3600+1
+  if span>2160:raise ValueError('试点时段最长90天（2160小时）')
+  return self
+class ApproveInput(BaseModel):eval_version:int=Field(ge=0)
